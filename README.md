@@ -1,4 +1,12 @@
-# Hyperion backend
+# Traiecta API
+
+[![CI](https://github.com/Traiecta-Labs/traiecta-api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Traiecta-Labs/traiecta-api/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Stellar](https://img.shields.io/badge/Stellar-Soroban-%237b2ff7?logo=stellar)](https://developers.stellar.org)
+[![Node.js](https://img.shields.io/badge/Node.js-20%2B-%23339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-%233178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Postgres](https://img.shields.io/badge/Postgres-16-%234169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 The off-chain half. It answers one question and performs one job.
 
@@ -16,6 +24,38 @@ on chain, and a keeper that notices and pays is worth more than a support inbox.
 This process holds no keys that can move user funds. Everything it calls is either a read or a
 permissionless call that anybody could make, which is a deliberate limit on how much damage it can
 do if it is compromised.
+
+## How it uses Stellar
+
+The backend is the read side of the Traiecta stack. It indexes and tracks transfers without ever holding a key that can move funds:
+
+- **Soroban event watcher** reads `BridgeIn` events through Stellar RPC `getEvents`, held on a cursor that is safe across the bounded ledger windows the endpoint returns.
+- **Deterministic finality** means a closed Stellar ledger is final, so the Stellar watcher needs no reorg handling, unlike the EVM side.
+- **Rail pollers** follow the off-chain middle of a transfer (Circle Iris attestation, Axelar GMP status) for the leg that exists only in somebody else's API.
+- **Keeper calls are permissionless.** Everything the keeper submits, on Stellar or on EVM, is a call anybody could make, so a compromise cannot move user funds.
+- **Shared codecs.** Stellar addresses and strkeys are parsed with `@traiecta/protocol`, so the row a watcher writes matches what the router wrote on chain.
+
+## Table of Contents
+
+- [How it uses Stellar](#how-it-uses-stellar)
+- [State of play](#state-of-play)
+  - [Organization links](#organization-links)
+- [Why the config layer is the longest file here](#why-the-config-layer-is-the-longest-file-here)
+- [The poller](#the-poller)
+- [Health and readiness mean different things](#health-and-readiness-mean-different-things)
+- [Schema notes](#schema-notes)
+- [Two chains, two watchers, and why they are not one file with a flag](#two-chains-two-watchers-and-why-they-are-not-one-file-with-a-flag)
+  - [What the Stellar watcher had to be told about getEvents](#what-the-stellar-watcher-had-to-be-told-about-getevents)
+  - [What the EVM watcher does about reorgs](#what-the-evm-watcher-does-about-reorgs)
+- [Prerequisites](#prerequisites)
+- [Running it](#running-it)
+  - [The shared SDK](#the-shared-sdk)
+  - [Secrets](#secrets)
+- [Environment Variables Reference](#environment-variables-reference)
+- [Tests](#tests)
+- [Deployment](#deployment)
+- [Security Notes](#security-notes)
+- [License](#license)
 
 ## State of play
 
@@ -38,10 +78,10 @@ Built and verified:
 
 ### Organization links
 
-This service connects on-chain contracts with the web interface across the StellarHyperion organization:
+This service connects on-chain contracts with the web interface across the Traiecta-Labs organization:
 
-- Contracts: [stellarhyperion-contracts](https://github.com/StellarHyperion/stellarhyperion-contracts)
-- Frontend: [stellarhyperion-frontend](https://github.com/StellarHyperion/stellarhyperion-frontend)
+- Contracts: [traiecta-contracts](https://github.com/Traiecta-Labs/traiecta-contracts)
+- Frontend: [traiecta-app](https://github.com/Traiecta-Labs/traiecta-app)
 
 ## Why the config layer is the longest file here
 
@@ -65,10 +105,10 @@ request as a fetch error naming nothing an operator can act on. Every URL variab
 which schemes it accepts and the parse requires a host, so a redis url in `DATABASE_URL` is refused
 by name at startup.
 
-**One mistake produced several faults pointing at the wrong variable.** A missing `HYPERION_NETWORK`
+**One mistake produced several faults pointing at the wrong variable.** A missing `TRAIECTA_NETWORK`
 made the enum reader fall back to the first mode, which made every chain in a testnet deployment
 record look like it belonged to the wrong network, and the result was two faults blaming
-`HYPERION_DEPLOYMENTS_FILE` for a file that was fine. A cascading fault is worse than a silent one:
+`TRAIECTA_DEPLOYMENTS_FILE` for a file that was fine. A cascading fault is worse than a silent one:
 it sends somebody to edit the wrong thing, confidently. Derived checks now stand down when their own
 inputs have already failed, and a variable is named at most once.
 
@@ -172,6 +212,21 @@ Both watchers report `degraded` at worst and never `down`. `/ready` takes the wo
 process, and a 503 because one chain is unreachable would stop this replica answering about the
 chains that are fine. Moving an outage is not fixing one.
 
+## Prerequisites
+
+| Tool | Version / Notes | Install |
+| --- | --- | --- |
+| **Node.js** | 20 or newer, with npm | https://nodejs.org |
+| **Docker** | for the Postgres 16 and Redis 7 compose services | https://docs.docker.com/get-docker/ |
+| **Traiecta contracts repo** | checked out as a sibling, for the shared `@traiecta/protocol` SDK | [traiecta-contracts](https://github.com/Traiecta-Labs/traiecta-contracts) |
+
+Verify your setup:
+
+```bash
+node --version
+docker --version
+```
+
 ## Running it
 
 ```bash
@@ -191,7 +246,7 @@ already running on a development machine.
 
 ### The shared SDK
 
-`@hyperion/protocol` comes from the contracts repository as a `file:` dependency, which means the
+`@traiecta/protocol` comes from the contracts repository as a `file:` dependency, which means the
 two repositories have to sit side by side and the package has to be built before an install here
 will resolve. CI checks out the contracts repo as a sibling for exactly that reason.
 
@@ -206,6 +261,26 @@ disagree the first time somebody adds an error variant.
 Only `.env.example` is committed and every value in it is a placeholder. `.env` and anything
 matching it is gitignored. No value is ever logged, including on error paths, and the config layer
 reports a bad credential by naming the variable and the shape it failed rather than the string.
+
+## Environment Variables Reference
+
+Copy `.env.example` to `.env` and fill it in. Values are validated at startup; a configuration error names every variable it could not satisfy, and no value is ever logged.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | yes | Postgres connection string (compose publishes on 5433) |
+| `REDIS_URL` | yes | Redis connection string (compose publishes on 6380) |
+| `TRAIECTA_NETWORK` | yes | `testnet` or `mainnet`; selects which half of the chain registry is in play |
+| `TRAIECTA_DEPLOYMENTS_FILE` | yes | Deployment record written by the contracts repo |
+| `NODE_ENV` | no | `development`, `test`, or `production` |
+| `LOG_LEVEL` | no | Pino log level |
+| `HTTP_HOST`, `HTTP_PORT` | no | Bind address and port for the Fastify server |
+| `INDEXER_ENABLED` | no | Toggle the poller loop |
+| `SHUTDOWN_TIMEOUT_MS` | no | Graceful shutdown budget |
+| `STELLAR_EVENT_PAGE_SIZE` | no | Page size for Soroban `getEvents` reads |
+| `STELLAR_POLL_INTERVAL_MS` | no | Idle interval for the Stellar watcher |
+| `EVM_POLL_INTERVAL_MS` | no | Idle interval for the EVM watcher |
+| `EVM_LOG_RANGE` | no | Maximum block range per EVM log query |
 
 ## Tests
 
@@ -227,6 +302,15 @@ The backend API surface is deployed to Vercel as a Serverless Function:
 - Health probe: https://stellarhyperion-backend.vercel.app/health
 - Readiness probe: https://stellarhyperion-backend.vercel.app/ready
 - Configuration: `vercel.json` rewrites and entrypoint `api/index.ts`
+
+## Security Notes
+
+- **No keys that move funds.** Every Stellar and EVM call this service makes is a read or a permissionless call, so a compromise of this process cannot move user value.
+- **Secrets stay out of logs.** `DATABASE_URL` and `REDIS_URL` carry passwords; the config layer reports a bad credential by naming the variable and the shape it failed, never the string.
+- **Only `.env.example` is committed**, and every value in it is a placeholder. `.env` and anything matching it is gitignored.
+- **Amounts and nonces are stored wide.** Money is `NUMERIC(78,0)` and nonces and claim ids are `NUMERIC(20,0)`, so nothing overflows or rounds.
+- **Fail loud at boot.** The process refuses to start on a partial configuration rather than discovering the rest on the first inbound transfer.
+- **Readiness is honest.** A chain that is unreachable reports `degraded`, never `down`, so a single outage does not stop the replica answering about the chains that are fine.
 
 ## License
 
